@@ -104,7 +104,7 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if to != "" {
-		if cli := getClientByID(to); cli == nil {
+		if i, _ := getClientByID(to); i < 0 {
 			http.Error(w, to+" is not online", http.StatusBadRequest)
 			return
 		}

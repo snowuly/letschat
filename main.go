@@ -130,10 +130,12 @@ func clientsLoop() {
 
 		case cli := <-enter:
 			log.Printf("enter: %s %s\n", cli.ID, cli.IP)
-			if old := getClientByID(cli.ID); old != nil {
+			if i, old := getClientByID(cli.ID); i >= 0 {
+				clients[i] = cli
 				close(old.kick)
+			} else {
+				clients = append(clients, cli)
 			}
-			clients = append(clients, cli)
 			boradcaseUsers()
 
 		case id := <-leave:
@@ -161,13 +163,13 @@ func removeClientByID(id string) {
 	clients = append(clients[:index], clients[index+1:]...)
 }
 
-func getClientByID(id string) *client {
-	for _, cli := range clients {
+func getClientByID(id string) (int, *client) {
+	for index, cli := range clients {
 		if cli.ID == id {
-			return cli
+			return index, cli
 		}
 	}
-	return nil
+	return -1, nil
 }
 
 func boradcaseUsers() {
