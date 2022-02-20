@@ -1,4 +1,4 @@
-package chat
+package letschat
 
 import (
 	"container/list"

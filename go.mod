@@ -1,3 +1,3 @@
-module tony/chat
+module github.com/snowuly/letschat
 
 go 1.17
