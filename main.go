@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -40,10 +41,20 @@ func genMsg(from, to, txt string, pri bool) *msg {
 }
 
 type client struct {
-	id    string
-	ch    chan *msg
-	kick  chan struct{}
-	users chan []string
+	ID, IP string
+	ch     chan *msg
+	kick   chan struct{}
+	users  chan string
+}
+
+func (c *client) toJSON() string {
+	b, err := json.Marshal(c)
+	if err != nil {
+		log.Println(err)
+		return ""
+	}
+
+	return string(b)
 }
 
 var (
@@ -53,12 +64,14 @@ var (
 
 var (
 	clientsMu   sync.Mutex
-	clients     map[string]*client
-	clientsChan chan map[string]*client
+	clients     []*client
+	clientsChan chan []*client
 
 	enter    chan *client
 	leave    chan string // client id
 	messages chan *msg
+
+	logChan chan string
 )
 
 func init() {
@@ -74,6 +87,18 @@ func init() {
 			start++
 		}
 	}()
+
+	logChan = make(chan string)
+
+	go func() {
+		for {
+			s, ok := <-logChan
+			if !ok {
+				return
+			}
+			log.Println(s)
+		}
+	}()
 }
 
 func Start() {
@@ -82,7 +107,6 @@ func Start() {
 }
 
 func clientsLoop() {
-	clients = make(map[string]*client)
 	messages = make(chan *msg)
 	enter = make(chan *client)
 	leave = make(chan string)
@@ -92,11 +116,10 @@ func clientsLoop() {
 		case m := <-messages:
 			recordLog(m)
 			if m.Pri {
-				if cli, ok := clients[m.From]; ok {
-					go sendTo(cli.ch, m)
-				}
-				if cli, ok := clients[m.To]; ok {
-					go sendTo(cli.ch, m)
+				for _, cli := range clients {
+					if cli.ID == m.To || cli.ID == m.From {
+						go sendTo(cli.ch, m)
+					}
 				}
 				continue
 			}
@@ -106,29 +129,59 @@ func clientsLoop() {
 			}
 
 		case cli := <-enter:
-			if old, ok := clients[cli.id]; ok {
+			log.Printf("enter: %s %s\n", cli.ID, cli.IP)
+			if old := getClientByID(cli.ID); old != nil {
 				close(old.kick)
 			}
-			clients[cli.id] = cli
-			boradcaseUsers(clients)
+			clients = append(clients, cli)
+			boradcaseUsers()
 
 		case id := <-leave:
-			delete(clients, id)
-			boradcaseUsers(clients)
+			log.Printf("leave: %s\n", id)
+
+			removeClientByID(id)
+			boradcaseUsers()
 		}
 
 	}
 }
 
-func boradcaseUsers(m map[string]*client) {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+func removeClientByID(id string) {
+	index := -1
+
+	for i, cli := range clients {
+		if cli.ID == id {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return
+	}
+	clients = append(clients[:index], clients[index+1:]...)
+}
+
+func getClientByID(id string) *client {
+	for _, cli := range clients {
+		if cli.ID == id {
+			return cli
+		}
+	}
+	return nil
+}
+
+func boradcaseUsers() {
+	arr := make([]string, len(clients))
+
+	for i, cli := range clients {
+		arr[i] = cli.toJSON()
 	}
 
-	for _, c := range m {
+	str := "[" + strings.Join(arr, ",") + "]"
+
+	for _, c := range clients {
 		go func(c *client) {
-			c.users <- keys
+			c.users <- str
 		}(c)
 	}
 
@@ -152,6 +205,8 @@ func logout(id string) {
 const max = 100
 
 func recordLog(m *msg) {
+	log.Println(m.toJSON())
+
 	msgLogsMu.Lock()
 	msgLogs.PushBack(m)
 	for msgLogs.Len() > 100 {

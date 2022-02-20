@@ -14,7 +14,10 @@ import (
 	"time"
 )
 
-var secret2name map[string]string
+var (
+	secret2name map[string]string
+	admin       string
+)
 
 type SessionItem struct {
 	id     string
@@ -45,10 +48,15 @@ func SetSessionItem(sid, id string) {
 func init() {
 	session = make(map[string]SessionItem)
 
-	secret2name = map[string]string{
-		"haha": "系统管理员",
-		"hehe": "Tony",
-		"xixi": "John",
+	// secret2name = map[string]string{
+	// 	"haha": "系统管理员",
+	// 	"hehe": "Tony",
+	// 	"xixi": "John",
+	// }
+	var err error
+	secret2name, admin, err = getUserMap()
+	if err != nil {
+		log.Fatal(fmt.Errorf("getUserMap error: %v", err))
 	}
 }
 
@@ -96,8 +104,8 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if to != "" {
-		if _, ok := clients[to]; !ok {
-			http.Error(w, "user is not online", http.StatusBadRequest)
+		if cli := getClientByID(to); cli == nil {
+			http.Error(w, to+" is not online", http.StatusBadRequest)
 			return
 		}
 	}
@@ -182,17 +190,15 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	cli := &client{
 		name,
+		r.Header.Get("X-Real-IP"),
 		make(chan *msg),
 		make(chan struct{}),
-		make(chan []string),
+		make(chan string),
 	}
 
 	go login(cli)
 
-	logsChan := make(chan string)
-	go func() {
-		logsChan <- toJson(getLog(name))
-	}()
+	flushWriteString(w, "event: log\ndata: "+toJson(getLog(name))+"\n\n")
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -206,9 +212,7 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 			flushWriteString(w, "event: msg\ndata: "+m.toJSON()+"\n\n")
 			idleTicker.Reset(5 * time.Hour)
 		case users := <-cli.users:
-			flushWriteString(w, "event: users\ndata: "+usersToJSON(users)+"\n\n")
-		case logs := <-logsChan:
-			flushWriteString(w, "event: log\ndata: "+logs+"\n\n")
+			flushWriteString(w, "event: users\ndata: "+users+"\n\n")
 
 		case <-ticker.C:
 			flushWriteString(w, ": tick\n\n")
