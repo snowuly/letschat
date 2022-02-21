@@ -144,7 +144,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	sid := genSid()
 	SetSessionItem(sid, name)
 
-	http.SetCookie(w, &http.Cookie{Name: "sid", Path: "/", Value: sid, HttpOnly: true, MaxAge: 3600})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Path: "/", Value: sid, HttpOnly: true, MaxAge: 3600 * 24})
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, name)
 }
