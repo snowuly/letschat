@@ -67,6 +67,8 @@ func StartHTTP() {
 	http.HandleFunc("/user", handleUser)
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/send", handleSend)
+	http.HandleFunc("/clear", handleClearLog)
+	http.HandleFunc("/admin", handleAdmin)
 	http.HandleFunc("/sse", handleSSE)
 
 	log.Fatal(http.ListenAndServe("127.0.0.1:8900", nil))
@@ -78,19 +80,9 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookie, err := r.Cookie("sid")
-	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, "Need Login")
-		return
-	}
-	name, err := getSessionItem(cookie.Value)
+	name := handleName(w, r)
 
-	if err != nil {
-		w.WriteHeader(http.StatusForbidden)
-		cookie.MaxAge = -1
-		http.SetCookie(w, cookie)
-		io.WriteString(w, "Forbidden")
+	if name == "" {
 		return
 	}
 
@@ -121,19 +113,9 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookie, err := r.Cookie("sid")
-	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, "Need Login")
-		return
-	}
-	name, err := getSessionItem(cookie.Value)
+	name := handleName(w, r)
 
-	if err != nil {
-		w.WriteHeader(http.StatusForbidden)
-		cookie.MaxAge = -1
-		http.SetCookie(w, cookie)
-		io.WriteString(w, "Forbidden")
+	if name == "" {
 		return
 	}
 
@@ -167,20 +149,53 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, name)
 }
 
-func handleLogout(w http.ResponseWriter, r *http.Request) {
+func handleLogout() {
 
 }
 
-func handleSSE(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("sid")
-	if err != nil {
+func handleAdmin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	name := handleName(w, r)
+
+	if name == "" {
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "%t", name == admin)
+}
+
+func handleClearLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	name := handleName(w, r)
+
+	if name == "" {
+		return
+	}
+
+	if name != admin {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	name, err := getSessionItem(cookie.Value)
-	if err != nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		fmt.Fprintf(w, "")
+
+	clearLog()
+
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, "OK")
+}
+
+func handleSSE(w http.ResponseWriter, r *http.Request) {
+	name := handleName(w, r)
+
+	if name == "" {
 		return
 	}
 
@@ -191,6 +206,7 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 	cli := &client{
 		name,
 		r.Header.Get("X-Real-IP"),
+		name == admin,
 		make(chan *msg),
 		make(chan struct{}),
 		make(chan string),

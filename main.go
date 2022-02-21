@@ -42,6 +42,7 @@ func genMsg(from, to, txt string, pri bool) *msg {
 
 type client struct {
 	ID, IP string
+	Admin  bool
 	ch     chan *msg
 	kick   chan struct{}
 	users  chan string
@@ -214,6 +215,12 @@ func recordLog(m *msg) {
 	for msgLogs.Len() > 100 {
 		msgLogs.Remove(msgLogs.Front())
 	}
+	msgLogsMu.Unlock()
+}
+
+func clearLog() {
+	msgLogsMu.Lock()
+	msgLogs.Init()
 	msgLogsMu.Unlock()
 }
 
