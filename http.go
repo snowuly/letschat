@@ -102,7 +102,7 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	messages <- genMsg(name, to, txt, pri != "")
+	messages <- genMsg(name, to, txt, pri != "" && to != "")
 
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, "OK")
