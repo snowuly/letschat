@@ -3,13 +3,11 @@ package letschat
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 )
@@ -17,6 +15,7 @@ import (
 var (
 	secret2name map[string]string
 	admin       string
+	chatRoom    *Room
 )
 
 type SessionItem struct {
@@ -96,13 +95,13 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if to != "" {
-		if i, _ := getClientByID(to); i < 0 {
+		if i, _ := chatRoom.getUser(to); i < 0 {
 			http.Error(w, to+" is not online", http.StatusBadRequest)
 			return
 		}
 	}
 
-	messages <- genMsg(name, to, txt, pri != "" && to != "")
+	go chatRoom.Send(name, to, txt, pri != "" && to != "")
 
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, "OK")
@@ -186,7 +185,7 @@ func handleClearLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clearLog()
+	chatRoom.clearLog()
 
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, "OK")
@@ -203,18 +202,17 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	cli := &client{
+	user := &User{
 		name,
+		"",
 		r.Header.Get("X-Real-IP"),
 		name == admin,
-		make(chan *msg),
-		make(chan struct{}),
-		make(chan string),
+		make(chan []byte),
 	}
 
-	go login(cli)
+	go chatRoom.Enter(user)
 
-	flushWriteString(w, "event: log\ndata: "+toJson(getLog(name))+"\n\n")
+	flushWriteString(w, "event: log\ndata: "+string(chatRoom.getLog(user.ID))+"\n\n")
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -224,25 +222,29 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
-		case m := <-cli.ch:
-			flushWriteString(w, "event: msg\ndata: "+m.toJSON()+"\n\n")
+		case m, ok := <-user.ch:
+			if !ok {
+				flushWriteString(w, "event: close\ndata: \n\n")
+				return
+			}
+
+			end := len(m) - 1
+			if m[end] == 0 { // msg
+				flushWriteString(w, "event: msg\ndata: "+string(m[:end])+"\n\n")
+			} else if m[end] == 1 {
+				flushWriteString(w, "event: users\ndata: "+string(m[:end])+"\n\n")
+			}
 			idleTicker.Reset(5 * time.Hour)
-		case users := <-cli.users:
-			flushWriteString(w, "event: users\ndata: "+users+"\n\n")
 
 		case <-ticker.C:
 			flushWriteString(w, ": tick\n\n")
 
 		case <-idleTicker.C:
-			logout(name)
-			return
-
-		case <-cli.kick:
-			flushWriteString(w, "event: close\ndata: \n\n")
+			chatRoom.Leave(name)
 			return
 
 		case <-ctx.Done():
-			logout(name)
+			chatRoom.Leave(name)
 			return
 		}
 	}
@@ -254,26 +256,6 @@ func genSid() string {
 		return ""
 	}
 	return base64.URLEncoding.EncodeToString(b)
-}
-
-func usersToJSON(s []string) string {
-	b, err := json.Marshal(s)
-	if err != nil {
-		log.Printf("usesTOJSON error: %v\n", err)
-		return "[]"
-	}
-
-	return string(b)
-}
-
-func toJson(list []*msg) string {
-	buf := make([]string, 0, len(list))
-
-	for _, item := range list {
-		buf = append(buf, item.toJSON())
-	}
-
-	return "[" + strings.Join(buf, ",") + "]"
 }
 
 func flushWriteString(w http.ResponseWriter, s string) {
