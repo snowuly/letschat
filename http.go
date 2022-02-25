@@ -87,21 +87,13 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 
 	txt := r.PostFormValue("txt")
 	to := r.PostFormValue("to")
-	pri := r.PostFormValue("pri")
+	priv := r.PostFormValue("priv")
 
-	if txt == "" {
+	if err := <-chatRoom.Send(name, to, txt, priv != ""); err != nil {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
 		return
 	}
-
-	if to != "" {
-		if i, _ := chatRoom.getUser(to); i < 0 {
-			http.Error(w, to+" is not online", http.StatusBadRequest)
-			return
-		}
-	}
-
-	go chatRoom.Send(name, to, txt, pri != "" && to != "")
 
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, "OK")
@@ -185,7 +177,7 @@ func handleClearLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chatRoom.clearLog()
+	chatRoom.ClearLog()
 
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, "OK")
@@ -212,8 +204,6 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	go chatRoom.Enter(user)
 
-	flushWriteString(w, "event: log\ndata: "+string(chatRoom.getLog(user.ID))+"\n\n")
-
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -224,20 +214,16 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 		select {
 		case m, ok := <-user.ch:
 			if !ok {
-				flushWriteString(w, "event: close\ndata: \n\n")
+				w.Write([]byte("event: close\ndata: \n\n"))
 				return
 			}
 
 			end := len(m) - 1
-			if m[end] == 0 { // msg
-				flushWriteString(w, "event: msg\ndata: "+string(m[:end])+"\n\n")
-			} else if m[end] == 1 {
-				flushWriteString(w, "event: users\ndata: "+string(m[:end])+"\n\n")
-			}
-			idleTicker.Reset(5 * time.Hour)
+			flushWrite(w, m[end], m[:end])
 
 		case <-ticker.C:
-			flushWriteString(w, ": tick\n\n")
+			w.Write([]byte(": tick\n\n"))
+			w.(http.Flusher).Flush()
 
 		case <-idleTicker.C:
 			chatRoom.Leave(name)
@@ -258,7 +244,25 @@ func genSid() string {
 	return base64.URLEncoding.EncodeToString(b)
 }
 
-func flushWriteString(w http.ResponseWriter, s string) {
-	io.WriteString(w, s)
+var (
+	MSG_PREFIX   = []byte("event: msg\ndata: ")
+	USERS_PREFIX = []byte("event: users\ndata: ")
+	LOG_PREFIX   = []byte("event: log\ndata: ")
+)
+
+func flushWrite(w http.ResponseWriter, kind byte, data []byte) {
+	var output []byte
+	switch kind {
+	case 0:
+		output = append(MSG_PREFIX, data...)
+	case 1:
+		output = append(USERS_PREFIX, data...)
+	case 2:
+		output = append(LOG_PREFIX, data...)
+	default:
+		output = []byte{':'}
+	}
+	output = append(output, '\n', '\n')
+	w.Write(output)
 	w.(http.Flusher).Flush()
 }

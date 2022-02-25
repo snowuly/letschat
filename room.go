@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 )
 
@@ -15,28 +14,30 @@ type Msg struct {
 	ID, From, To, Txt string
 	Time              int64
 	Priv              bool
+	err               chan error
 }
 
 type User struct {
 	ID, Name, IP string
 	Admin        bool
-	ch           chan []byte // json + TYPE(0: message 1: users)
+	ch           chan []byte // json + TYPE(0: message 1: users 2: log)
 }
 
 type Room struct {
-	ID    int
-	Name  string
-	Users []*User
-	msg   chan *Msg
-	enter chan *User
-	leave chan string
-	log   *list.List
-	file  *os.File
-	sync.RWMutex
+	ID        int
+	Name      string
+	Users     []*User
+	msg       chan *Msg
+	enter     chan *User
+	leave     chan string
+	log       *list.List
+	file      *os.File
+	iwannalog chan *User
+	clearlog  chan struct{}
 }
 
 func (r *Room) Start() error {
-	file, err := os.OpenFile(fmt.Sprintf("r-%d-log", r.ID), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0755)
+	file, err := os.OpenFile(fmt.Sprintf("r-%d.log", r.ID), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0755)
 	if err != nil {
 		return err
 	}
@@ -48,10 +49,20 @@ func (r *Room) Start() error {
 	for {
 		select {
 		case m := <-r.msg:
+			err := r.checkMsg(m)
+			go func() { m.err <- err }()
+			if err != nil {
+				log.Printf("[send err]: %s-%s-%s\n", m.From, m.To, err.Error())
+				continue
+			}
+
 			r.addLog(m)
+
 			b, _ := json.Marshal(m)
+
 			r.file.Write(msgPrefix)
 			r.file.Write(append(b, '\n'))
+
 			data := append(b, 0)
 
 			if m.Priv {
@@ -74,11 +85,21 @@ func (r *Room) Start() error {
 			} else {
 				r.Users = append(r.Users, user)
 			}
+
 			r.broadcastUsers()
+
+			go func() {
+				r.iwannalog <- user
+			}()
 		case id := <-r.leave:
 			user := r.removeUser(id)
 			r.file.WriteString(fmt.Sprintf("[user]: %s %s %s leave\n", user.ID, user.Name, user.IP))
 			r.broadcastUsers()
+		case u := <-r.iwannalog:
+			b := r.getLog(u.ID)
+			u.ch <- append(b, 2) // 2 means it's log data
+		case <-r.clearlog:
+			r.log.Init()
 		}
 	}
 }
@@ -112,18 +133,13 @@ func (r *Room) removeUser(id string) (user *User) {
 }
 
 func (r *Room) addLog(m *Msg) {
-	r.Lock()
 	r.log.PushBack(m)
 	if r.log.Len() > 200 {
 		r.log.Remove(r.log.Front())
 	}
-	r.Unlock()
 }
 
 func (r *Room) getLog(id string) []byte {
-	r.RLock()
-	defer r.RUnlock()
-
 	list := make([]*Msg, 0, r.log.Len())
 
 	for e := r.log.Front(); e != nil; e = e.Next() {
@@ -138,10 +154,8 @@ func (r *Room) getLog(id string) []byte {
 	return b
 }
 
-func (r *Room) clearLog() {
-	r.Lock()
-	r.log.Init()
-	r.Unlock()
+func (r *Room) ClearLog() {
+	r.clearlog <- struct{}{}
 }
 
 func (r *Room) broadcastUsers() {
@@ -155,7 +169,11 @@ func (r *Room) broadcastUsers() {
 	}
 }
 
-func (r *Room) Send(from, to, txt string, priv bool) {
+func (r *Room) Send(from, to, txt string, priv bool) <-chan error {
+	if priv && to == "" {
+		priv = false
+	}
+	err := make(chan error)
 	r.msg <- &Msg{
 		<-mid,
 		from,
@@ -163,7 +181,40 @@ func (r *Room) Send(from, to, txt string, priv bool) {
 		txt,
 		time.Now().Unix(),
 		priv,
+		err,
 	}
+	return err
+}
+
+func (r *Room) checkMsg(m *Msg) error {
+	if m.Txt == "" {
+		return MsgErrno(3)
+	}
+	found := false
+	for _, u := range r.Users {
+		if u.ID == m.From {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return MsgErrno(0)
+	}
+
+	if m.To != "" {
+		found = false
+		for _, u := range r.Users {
+			if m.To == u.ID {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return MsgErrno(1)
+	}
+
+	return nil
 }
 
 func (r *Room) Enter(u *User) {
@@ -176,13 +227,15 @@ func (r *Room) Leave(id string) {
 
 func NewRoom(name string) *Room {
 	return &Room{
-		ID:    <-rid,
-		Name:  name,
-		Users: make([]*User, 0),
-		msg:   make(chan *Msg, 10),
-		enter: make(chan *User),
-		leave: make(chan string),
-		log:   list.New(),
+		ID:        <-rid,
+		Name:      name,
+		Users:     make([]*User, 0),
+		msg:       make(chan *Msg, 10),
+		enter:     make(chan *User),
+		leave:     make(chan string),
+		log:       list.New(),
+		iwannalog: make(chan *User),
+		clearlog:  make(chan struct{}),
 	}
 }
 
