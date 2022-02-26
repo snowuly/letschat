@@ -3,6 +3,7 @@ package letschat
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +16,6 @@ import (
 var (
 	secret2name map[string]string
 	admin       string
-	chatRoom    *Room
 )
 
 type SessionItem struct {
@@ -67,7 +67,8 @@ func StartHTTP() {
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/send", handleSend)
 	http.HandleFunc("/clear", handleClearLog)
-	http.HandleFunc("/admin", handleAdmin)
+	http.HandleFunc("/room", handleRoom)
+	http.HandleFunc("/roompwd", handleRoomPwd)
 	http.HandleFunc("/sse", handleSSE)
 
 	log.Fatal(http.ListenAndServe("127.0.0.1:8900", nil))
@@ -89,7 +90,13 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 	to := r.PostFormValue("to")
 	priv := r.PostFormValue("priv")
 
-	if err := <-chatRoom.Send(name, to, txt, priv != ""); err != nil {
+	room := handleRoomReq(w, r)
+
+	if room == nil {
+		return
+	}
+
+	if err := <-room.Send(name, to, txt, priv != ""); err != nil {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
 		return
@@ -111,8 +118,54 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, name)
+	fmt.Fprintf(w, "%s|%t", name, name == admin)
 }
+func handleRoom(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	name := handleName(w, r)
+
+	if name == "" {
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(GetRoomList(name))
+}
+
+func handleRoomPwd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	name := handleName(w, r)
+	if name == "" {
+		return
+	}
+
+	pwd := r.PostFormValue("pwd")
+	if pwd == "" {
+		http.Error(w, "password is empty", http.StatusBadRequest)
+		return
+	}
+
+	room := handleRoomReq(w, r)
+	if room == nil {
+		return
+	}
+
+	if err := GetCredit(room.ID, name, pwd); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Write([]byte("OK"))
+}
+
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		w.WriteHeader(http.StatusNotFound)
@@ -138,26 +191,11 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "sid", Path: "/", Value: sid, HttpOnly: true, MaxAge: 3600 * 24})
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, name)
+	fmt.Fprintf(w, "%s|%t", name, name == admin)
 }
 
 func handleLogout() {
 
-}
-
-func handleAdmin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	name := handleName(w, r)
-
-	if name == "" {
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "%t", name == admin)
 }
 
 func handleClearLog(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +215,13 @@ func handleClearLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chatRoom.ClearLog()
+	room := handleRoomReq(w, r)
+
+	if room == nil {
+		return
+	}
+
+	room.ClearLog()
 
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, "OK")
@@ -202,7 +246,19 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 		make(chan []byte),
 	}
 
-	go chatRoom.Enter(user)
+	room := handleRoomReq(w, r)
+	if room == nil {
+		return
+	}
+
+	if room.pwd != "" {
+		if !HasCredit(room.ID, name) {
+			w.Write([]byte("event: err\ndata: pwd\n\n"))
+			return
+		}
+	}
+
+	go room.Enter(user)
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -214,7 +270,7 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 		select {
 		case m, ok := <-user.ch:
 			if !ok {
-				w.Write([]byte("event: close\ndata: \n\n"))
+				w.Write([]byte("event: err\ndata: kicked\n\n"))
 				return
 			}
 
@@ -226,11 +282,11 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 			w.(http.Flusher).Flush()
 
 		case <-idleTicker.C:
-			chatRoom.Leave(name)
+			room.Leave(name)
 			return
 
 		case <-ctx.Done():
-			chatRoom.Leave(name)
+			room.Leave(name)
 			return
 		}
 	}
@@ -242,27 +298,4 @@ func genSid() string {
 		return ""
 	}
 	return base64.URLEncoding.EncodeToString(b)
-}
-
-var (
-	MSG_PREFIX   = []byte("event: msg\ndata: ")
-	USERS_PREFIX = []byte("event: users\ndata: ")
-	LOG_PREFIX   = []byte("event: log\ndata: ")
-)
-
-func flushWrite(w http.ResponseWriter, kind byte, data []byte) {
-	var output []byte
-	switch kind {
-	case 0:
-		output = append(MSG_PREFIX, data...)
-	case 1:
-		output = append(USERS_PREFIX, data...)
-	case 2:
-		output = append(LOG_PREFIX, data...)
-	default:
-		output = []byte{':'}
-	}
-	output = append(output, '\n', '\n')
-	w.Write(output)
-	w.(http.Flusher).Flush()
 }

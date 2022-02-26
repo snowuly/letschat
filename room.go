@@ -25,7 +25,7 @@ type User struct {
 
 type Room struct {
 	ID        int
-	Name      string
+	Name, pwd string
 	Users     []*User
 	msg       chan *Msg
 	enter     chan *User
@@ -225,7 +225,7 @@ func (r *Room) Leave(id string) {
 	r.leave <- id
 }
 
-func NewRoom(name string) *Room {
+func NewRoom(name string, pwd string) *Room {
 	return &Room{
 		ID:        <-rid,
 		Name:      name,
@@ -236,6 +236,7 @@ func NewRoom(name string) *Room {
 		log:       list.New(),
 		iwannalog: make(chan *User),
 		clearlog:  make(chan struct{}),
+		pwd:       pwd,
 	}
 }
 
