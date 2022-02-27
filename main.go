@@ -2,14 +2,6 @@ package letschat
 
 import "log"
 
-type RoomInfo struct {
-	ID     int
-	Name   string
-	Num    int
-	Priv   bool
-	Credit bool
-}
-
 const max = 20
 
 var (
@@ -28,56 +20,11 @@ func AddRoom(name, pwd string) {
 	rooms = append(rooms, NewRoom(name, pwd))
 }
 
-func GetRoom(id int) *Room {
-	for _, r := range rooms {
-		if r.ID == id {
-			return r
-		}
-	}
-
-	return nil
-}
-
 func GetRoomList(uid string) (list []*RoomInfo) {
 	for _, room := range rooms {
-		list = append(list, getRoomInfo(room, uid))
+		list = append(list, room.Info(uid))
 	}
 	return
-}
-
-func getRoomInfo(room *Room, uid string) *RoomInfo {
-	priv := room.pwd != ""
-	var hasCredit bool
-	var num int
-
-	if priv {
-		hasCredit = HasCredit(room.ID, uid)
-	}
-
-	if !priv || hasCredit {
-		num = len(room.Users)
-	}
-
-	if !priv || HasCredit(room.ID, uid) {
-		num = len(room.Users)
-	}
-
-	return &RoomInfo{
-		room.ID,
-		room.Name,
-		num,
-		priv,
-		hasCredit,
-	}
-}
-
-func GetRoomInfo(uid string, rid int) *RoomInfo {
-	room := GetRoom(rid)
-	if room == nil {
-		return nil
-	}
-
-	return getRoomInfo(room, uid)
 }
 
 func Start() {

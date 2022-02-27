@@ -67,6 +67,7 @@ func StartHTTP() {
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/send", handleSend)
 	http.HandleFunc("/clear", handleClearLog)
+	http.HandleFunc("/rooms", handleRooms)
 	http.HandleFunc("/room", handleRoom)
 	http.HandleFunc("/roompwd", handleRoomPwd)
 	http.HandleFunc("/sse", handleSSE)
@@ -89,6 +90,12 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 	txt := r.PostFormValue("txt")
 	to := r.PostFormValue("to")
 	priv := r.PostFormValue("priv")
+	token := r.PostFormValue("token")
+
+	if txt == "" || token == "" {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
 
 	room := handleRoomReq(w, r)
 
@@ -96,7 +103,7 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := <-room.Send(name, to, txt, priv != ""); err != nil {
+	if err := <-room.Send(token, name, to, txt, priv != ""); err != nil {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
 		return
@@ -120,7 +127,7 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "%s|%t", name, name == admin)
 }
-func handleRoom(w http.ResponseWriter, r *http.Request) {
+func handleRooms(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -134,6 +141,26 @@ func handleRoom(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(GetRoomList(name))
+}
+
+func handleRoom(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	name := handleName(w, r)
+	if name == "" {
+		return
+	}
+
+	room := handleRoomReq(w, r)
+	if room == nil {
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(room.Info(name))
 }
 
 func handleRoomPwd(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +217,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	http.SetCookie(w, &http.Cookie{Name: "sid", Path: "/", Value: sid, HttpOnly: true, MaxAge: 3600 * 24})
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, name)
 	fmt.Fprintf(w, "%s|%t", name, name == admin)
 }
 
@@ -238,13 +264,7 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	user := &User{
-		name,
-		"",
-		r.Header.Get("X-Real-IP"),
-		name == admin,
-		make(chan []byte),
-	}
+	token := fmt.Sprintf("%d", time.Now().UnixMilli()) // TODO: shouldn't be predictable
 
 	room := handleRoomReq(w, r)
 	if room == nil {
@@ -258,7 +278,7 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	go room.Enter(user)
+	ch, token := room.Enter(name, "", r.Header.Get("X-Real-IP"), name == admin)
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -266,9 +286,12 @@ func handleSSE(w http.ResponseWriter, r *http.Request) {
 	idleTicker := time.NewTicker(5 * time.Hour)
 	defer idleTicker.Stop()
 
+	io.WriteString(w, fmt.Sprintf("event: token\ndata: %s\n\n", token))
+	w.(http.Flusher).Flush()
+
 	for {
 		select {
-		case m, ok := <-user.ch:
+		case m, ok := <-ch:
 			if !ok {
 				w.Write([]byte("event: err\ndata: kicked\n\n"))
 				return

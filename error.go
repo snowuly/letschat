@@ -8,6 +8,7 @@ var errs = [...]string{
 	0: "sender not found",
 	1: "receiver not found",
 	2: "content is empty",
+	3: "user is not online",
 }
 
 func (e MsgErrno) Error() string {

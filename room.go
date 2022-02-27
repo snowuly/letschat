@@ -11,16 +11,24 @@ import (
 )
 
 type Msg struct {
-	ID, From, To, Txt string
-	Time              int64
-	Priv              bool
-	err               chan error
+	ID, From, To, Txt, token string // token is used to identify whether the msg was sent by current online user
+	Time                     int64
+	Priv                     bool
+	err                      chan error
 }
 
 type User struct {
-	ID, Name, IP string
-	Admin        bool
-	ch           chan []byte // json + TYPE(0: message 1: users 2: log)
+	ID, Name, IP, token string
+	Admin               bool
+	ch                  chan []byte // json + TYPE(0: message 1: users 2: log)
+}
+
+type RoomInfo struct {
+	ID     int
+	Name   string
+	Num    int
+	Priv   bool
+	Credit bool
 }
 
 type Room struct {
@@ -169,7 +177,7 @@ func (r *Room) broadcastUsers() {
 	}
 }
 
-func (r *Room) Send(from, to, txt string, priv bool) <-chan error {
+func (r *Room) Send(token, from, to, txt string, priv bool) <-chan error {
 	if priv && to == "" {
 		priv = false
 	}
@@ -179,6 +187,7 @@ func (r *Room) Send(from, to, txt string, priv bool) <-chan error {
 		from,
 		to,
 		txt,
+		token,
 		time.Now().Unix(),
 		priv,
 		err,
@@ -188,11 +197,15 @@ func (r *Room) Send(from, to, txt string, priv bool) <-chan error {
 
 func (r *Room) checkMsg(m *Msg) error {
 	if m.Txt == "" {
-		return MsgErrno(3)
+		return MsgErrno(2)
 	}
+
 	found := false
 	for _, u := range r.Users {
 		if u.ID == m.From {
+			if u.token != m.token {
+				return MsgErrno(3)
+			}
 			found = true
 			break
 		}
@@ -201,28 +214,63 @@ func (r *Room) checkMsg(m *Msg) error {
 		return MsgErrno(0)
 	}
 
-	if m.To != "" {
-		found = false
-		for _, u := range r.Users {
-			if m.To == u.ID {
-				found = true
-				break
-			}
+	if m.To == "" {
+		return nil
+	}
+
+	for _, u := range r.Users {
+		if m.To == u.ID {
+			return nil
 		}
 	}
-	if !found {
-		return MsgErrno(1)
-	}
-
-	return nil
+	return MsgErrno(1)
 }
 
-func (r *Room) Enter(u *User) {
-	r.enter <- u
+// func (r *Room) Enter(u *User) {
+// 	r.enter <- u
+// }
+
+func (r *Room) Enter(id, name, ip string, admin bool) (<-chan []byte, string) {
+	user := &User{
+		id, name, ip,
+		strconv.FormatInt(time.Now().Unix(), 36),
+		admin,
+		make(chan []byte),
+	}
+
+	r.enter <- user
+
+	return user.ch, user.token
 }
 
 func (r *Room) Leave(id string) {
 	r.leave <- id
+}
+
+func (r *Room) Info(uid string) *RoomInfo {
+	priv := r.pwd != ""
+	var hasCredit bool
+	var num int
+
+	if priv {
+		hasCredit = HasCredit(r.ID, uid)
+	}
+
+	if !priv || hasCredit {
+		num = len(r.Users)
+	}
+
+	if !priv || HasCredit(r.ID, uid) {
+		num = len(r.Users)
+	}
+
+	return &RoomInfo{
+		r.ID,
+		r.Name,
+		num,
+		priv,
+		hasCredit,
+	}
 }
 
 func NewRoom(name string, pwd string) *Room {
@@ -238,6 +286,16 @@ func NewRoom(name string, pwd string) *Room {
 		clearlog:  make(chan struct{}),
 		pwd:       pwd,
 	}
+}
+
+func GetRoom(id int) *Room {
+	for _, r := range rooms {
+		if r.ID == id {
+			return r
+		}
+	}
+
+	return nil
 }
 
 var (
